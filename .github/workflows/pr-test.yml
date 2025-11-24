@@ -1,0 +1,166 @@
+name: PR Test on Remote Cluster
+
+# 在 PR 创建、更新或同步时触发
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches:
+      - main
+      - develop
+
+jobs:
+  pr-info:
+    name: Extract PR Information
+    runs-on: ubuntu-latest
+    outputs:
+      pr_number: ${{ steps.pr_info.outputs.pr_number }}
+      pr_branch: ${{ steps.pr_info.outputs.pr_branch }}
+      pr_base_branch: ${{ steps.pr_info.outputs.pr_base_branch }}
+      pr_sha: ${{ steps.pr_info.outputs.pr_sha }}
+      pr_repo: ${{ steps.pr_info.outputs.pr_repo }}
+      pr_head_ref: ${{ steps.pr_info.outputs.pr_head_ref }}
+
+    steps:
+      - name: Extract PR Information
+        id: pr_info
+        run: |
+          echo "=== PR Information ==="
+          echo "PR Number: ${{ github.event.pull_request.number }}"
+          echo "PR Branch (head ref): ${{ github.head_ref }}"
+          echo "PR Base Branch: ${{ github.base_ref }}"
+          echo "PR SHA: ${{ github.event.pull_request.head.sha }}"
+          echo "PR Repository: ${{ github.repository }}"
+          echo "PR Head Ref: ${{ github.event.pull_request.head.ref }}"
+          echo "PR Head Label: ${{ github.event.pull_request.head.label }}"
+          echo "PR User: ${{ github.event.pull_request.user.login }}"
+          echo ""
+
+          # 输出到 GitHub Actions outputs
+          echo "pr_number=${{ github.event.pull_request.number }}" >> $GITHUB_OUTPUT
+          echo "pr_branch=${{ github.head_ref }}" >> $GITHUB_OUTPUT
+          echo "pr_base_branch=${{ github.base_ref }}" >> $GITHUB_OUTPUT
+          echo "pr_sha=${{ github.event.pull_request.head.sha }}" >> $GITHUB_OUTPUT
+          echo "pr_repo=${{ github.repository }}" >> $GITHUB_OUTPUT
+          echo "pr_head_ref=${{ github.event.pull_request.head.ref }}" >> $GITHUB_OUTPUT
+
+          # 保存到文件供后续步骤使用
+          cat > pr_info.json << EOF
+          {
+            "pr_number": "${{ github.event.pull_request.number }}",
+            "pr_branch": "${{ github.head_ref }}",
+            "pr_base_branch": "${{ github.base_ref }}",
+            "pr_sha": "${{ github.event.pull_request.head.sha }}",
+            "pr_repo": "${{ github.repository }}",
+            "pr_head_ref": "${{ github.event.pull_request.head.ref }}",
+            "pr_user": "${{ github.event.pull_request.user.login }}"
+          }
+          EOF
+
+          echo "=== PR Info JSON ==="
+          cat pr_info.json
+
+      - name: Upload PR Info
+        uses: actions/upload-artifact@v3
+        with:
+          name: pr-info
+          path: pr_info.json
+
+  test-local:
+    name: Run Local Tests
+    runs-on: ubuntu-latest
+    needs: pr-info
+
+    steps:
+      - name: Checkout PR Branch
+        uses: actions/checkout@v3
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install dependencies
+        run: |
+          if [ -f app/requirements.txt ]; then
+            pip install -r app/requirements.txt
+          fi
+
+      - name: Run Application
+        run: |
+          echo "Running application from branch: ${{ needs.pr-info.outputs.pr_branch }}"
+          python app/main.py
+
+      - name: Run Tests
+        run: |
+          echo "Running tests for PR #${{ needs.pr-info.outputs.pr_number }}"
+          if [ -f tests/test_app.py ]; then
+            python -m pytest tests/ -v
+          fi
+
+  deploy-to-cluster:
+    name: Deploy to Remote Cluster
+    runs-on: ubuntu-latest
+    needs: [pr-info, test-local]
+
+    steps:
+      - name: Checkout PR Branch
+        uses: actions/checkout@v3
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Download PR Info
+        uses: actions/download-artifact@v3
+        with:
+          name: pr-info
+
+      - name: Display PR Info
+        run: |
+          echo "=== Deploying PR to Remote Cluster ==="
+          cat pr_info.json
+          echo ""
+          echo "Branch to deploy: ${{ needs.pr-info.outputs.pr_branch }}"
+          echo "PR Number: ${{ needs.pr-info.outputs.pr_number }}"
+
+      - name: Prepare Deployment Script
+        run: |
+          chmod +x scripts/deploy-to-cluster.sh
+
+      - name: Deploy to Cluster (Simulated)
+        env:
+          PR_NUMBER: ${{ needs.pr-info.outputs.pr_number }}
+          PR_BRANCH: ${{ needs.pr-info.outputs.pr_branch }}
+          PR_BASE_BRANCH: ${{ needs.pr-info.outputs.pr_base_branch }}
+          PR_SHA: ${{ needs.pr-info.outputs.pr_sha }}
+          PR_REPO: ${{ needs.pr-info.outputs.pr_repo }}
+        run: |
+          echo "Deploying to remote cluster..."
+          bash scripts/deploy-to-cluster.sh
+
+      - name: Run Remote Tests
+        env:
+          PR_NUMBER: ${{ needs.pr-info.outputs.pr_number }}
+          PR_BRANCH: ${{ needs.pr-info.outputs.pr_branch }}
+        run: |
+          if [ -f scripts/run-tests.sh ]; then
+            chmod +x scripts/run-tests.sh
+            bash scripts/run-tests.sh
+          fi
+
+      - name: Comment on PR
+        uses: actions/github-script@v6
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `✅ **Remote Cluster Test Completed**
+
+              **Branch:** \`${{ needs.pr-info.outputs.pr_branch }}\`
+              **Commit:** \`${{ needs.pr-info.outputs.pr_sha }}\`
+              **PR Number:** #${{ needs.pr-info.outputs.pr_number }}
+
+              The application has been deployed to the remote cluster and tests have passed.`
+            })
